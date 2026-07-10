@@ -79,6 +79,8 @@ python create_map_poster.py --city <city> --country <country> [options]
 | **OPTIONAL:** `--all-themes` | | Generate posters for all available themes | |
 | **OPTIONAL:** `--width` | `-W` | Image width in inches | 12 (max: 20) |
 | **OPTIONAL:** `--height` | `-H` | Image height in inches | 16 (max: 20) |
+| **OPTIONAL:** `--format` | `-f` | Output format: `png`, `svg`, or `pdf` | png |
+| **OPTIONAL:** `--ocean` | | Fill open sea/ocean areas (downloads a ~800MB dataset to `cache/` on first use) | off |
 
 ### Multilingual Support - i18n
 
@@ -201,6 +203,31 @@ python create_map_poster.py -c "Tokyo" -C "Japan" --all-themes
 | 8000-12000m | Medium cities, focused downtown (Paris, Barcelona) |
 | 15000-20000m | Large metros, full city view (Tokyo, Mumbai) |
 
+## Map Layers
+
+Non-road layers are declared in `layers.json` (edit it to add layers, change OSM tags, z-order, or colors — no code changes needed). The defaults render:
+
+| Layer | OSM tags | Theme color key (fallback) |
+|-------|----------|----------------------------|
+| `water` | `natural=water/bay/strait`, `waterway=riverbank` | `water` |
+| `farmland` | `landuse=farmland/orchard/vineyard` | `farmland` (`parks`) |
+| `forest` | `landuse=forest`, `natural=wood` | `forest` (`parks`) |
+| `grass` | `landuse=meadow/village_green/recreation_ground`, `natural=grassland` | `grass` (`parks`) |
+| `parks` | `leisure=park`, `landuse=grass` | `parks` |
+| `rail` | `railway=rail/subway/tram/light_rail` | `rail` (`road_secondary`) |
+
+Existing themes don't define the new keys, so those layers fall back to the colors shown in parentheses. If neither the color key nor the fallback resolves, the layer is skipped.
+
+### Ocean Fill (`--ocean`)
+
+OSM's water tags don't cover the open sea, so coastal posters normally leave the ocean empty. `--ocean` fills it using OpenStreetMap's [pre-built water polygons](https://osmdata.openstreetmap.de/data/water-polygons.html):
+
+```bash
+python create_map_poster.py -c "San Francisco" -C "USA" -t blueprint -d 8000 --ocean
+```
+
+On first use this downloads a ~800MB global dataset into `cache/` (kept for future runs). The ocean is colored with the theme's `ocean` key, falling back to `water`.
+
 ## Themes
 
 17 themes available in `themes/` directory:
@@ -230,8 +257,22 @@ python create_map_poster.py -c "Tokyo" -C "Japan" --all-themes
 Posters are saved to `posters/` directory with format:
 
 ```text
-{city}_{theme}_{YYYYMMDD_HHMMSS}.png
+{city}_{theme}_{YYYYMMDD_HHMMSS}.{png|svg|pdf}
 ```
+
+## Post-Processing Scripts
+
+Standalone scripts in `scripts/` (run with `uv run`, no install needed):
+
+```bash
+# Add a neon/bloom glow effect to a poster
+uv run scripts/add_glow.py posters/my_poster.png --intensity 1.2 --radius 10
+
+# Stripe the same city in different themes into one comparison image
+uv run scripts/merge_bands.py noir.png blueprint.png sunset.png -o merged.png
+```
+
+Both support `--dryrun`, `--verbose`, and `--force`; see each script's `--help` for all options.
 
 ## Adding Custom Themes
 
@@ -255,16 +296,36 @@ Create a JSON file in `themes/` directory:
 }
 ```
 
+### Optional Theme Keys
+
+Themes may additionally style the configurable layers (see [Map Layers](#map-layers)):
+
+```json
+{
+  "rail": "#00FFFF",
+  "rail_core": "#FFFFFF",
+  "forest": "#1A3A2A",
+  "farmland": "#2A3A1A",
+  "grass": "#22442A",
+  "ocean": "#0A1A2A"
+}
+```
+
+`rail_core` enables a dual-stroke "neon" look: a narrower line in the core color is drawn on top of the rail line — great for cyberpunk-style themes. All keys are optional; missing keys use the fallbacks described in [Map Layers](#map-layers).
+
 ## Project Structure
 
 ```text
 map_poster/
 ├── create_map_poster.py    # Main script
 ├── font_management.py      # Font loading and Google Fonts integration
+├── layers.json             # Declarative non-road layer config (tags, colors, z-order)
 ├── themes/                 # Theme JSON files
+├── scripts/                # Standalone post-processing scripts (glow, band merge)
 ├── fonts/                  # Font files
 │   ├── Roboto-*.ttf        # Default Roboto fonts
 │   └── cache/              # Downloaded Google Fonts (auto-generated)
+├── cache/                  # Cached OSM data + prepared render bundles (auto-generated)
 ├── posters/                # Generated posters
 └── README.md
 ```
@@ -284,47 +345,56 @@ Quick reference for contributors who want to extend or modify the script.
 
 ### Architecture Overview
 
+The script is a three-stage pipeline, built for speed on repeat runs:
+
 ```text
-┌─────────────────┐     ┌──────────────┐     ┌─────────────────┐
-│   CLI Parser    │────▶│  Geocoding   │────▶│  Data Fetching  │
-│   (argparse)    │     │  (Nominatim) │     │    (OSMnx)      │
-└─────────────────┘     └──────────────┘     └─────────────────┘
-                                                     │
-                        ┌──────────────┐             ▼
-                        │    Output    │◀────┌─────────────────┐
-                        │  (matplotlib)│     │   Rendering     │
-                        └──────────────┘     │  (matplotlib)   │
-                                             └─────────────────┘
+┌──────────────────┐   ┌───────────────────────┐   ┌──────────────────────┐
+│  fetch_layers()  │──▶│ prepare_render_data() │──▶│    render_poster()   │
+│ concurrent OSMnx │   │ project + classify +  │   │  pure matplotlib     │
+│ fetches, pickle- │   │ convert to matplotlib │   │  (LineCollection /   │
+│ cached per layer │   │ primitives; cached as │   │  PathCollection),    │
+│                  │   │ one "prepared" bundle │   │  theme passed in     │
+└──────────────────┘   └───────────────────────┘   └──────────────────────┘
 ```
+
+Warm runs (cached prepared bundle) skip stages 1-2 entirely — they never even import osmnx/geopandas. `--all-themes` prepares once and renders every theme in parallel worker processes. Delete `cache/` (or set `CACHE_DIR`) to force a refetch.
 
 ### Key Functions
 
 | Function | Purpose | Modify when... |
 |----------|---------|----------------|
 | `get_coordinates()` | City → lat/lon via Nominatim | Switching geocoding provider |
-| `create_poster()` | Main rendering pipeline | Adding new map layers |
-| `get_edge_colors_by_type()` | Road color by OSM highway tag | Changing road styling |
-| `get_edge_widths_by_type()` | Road width by importance | Adjusting line weights |
+| `fetch_layers()` | Concurrent OSM downloads (graph + every configured layer) | Changing how data is fetched/cached |
+| `prepare_render_data()` | Projection, road classification, polygon/line extraction; builds the cached bundle | Adding data that rendering needs |
+| `render_poster()` | Pure matplotlib rendering from the bundle | Changing visual output |
+| `_classify_highway()` | Road class label by OSM highway tag | Changing road hierarchy |
+| `_theme_road_colors()` / `_BASE_ROAD_WIDTHS` | Road class → color / width | Changing road styling or weights |
 | `create_gradient_fade()` | Top/bottom fade effect | Modifying gradient overlay |
 | `load_theme()` | JSON theme → dict | Adding new theme properties |
+| `load_layers_config()` | Loads `layers.json` (embedded fallback) | Changing layer config handling |
 | `is_latin_script()` | Detects script for typography | Supporting new scripts |
 | `load_fonts()` | Load custom/default fonts | Changing font loading logic |
 
 ### Rendering Layers (z-order)
 
 ```text
-z=11  Text labels (city, country, coords)
-z=10  Gradient fades (top & bottom)
-z=3   Roads (via ox.plot_graph)
-z=2   Parks (green polygons)
-z=1   Water (blue polygons)
-z=0   Background color
+z=11    Text labels (city, country, coords)
+z=10    Gradient fades (top & bottom)
+z=1.05  Rail lines (+0.01 for the optional core stroke)
+z=1     Roads (single LineCollection)
+z=0.8   Parks          ┐
+z=0.75  Grass          │ polygon layers; z-order set
+z=0.65  Forest         │ per layer in layers.json
+z=0.6   Farmland       │
+z=0.5   Water          │
+z=0.45  Ocean (--ocean)┘
+z=0     Background color
 ```
 
 ### OSM Highway Types → Road Hierarchy
 
 ```python
-# In get_edge_colors_by_type() and get_edge_widths_by_type()
+# In _classify_highway() and _BASE_ROAD_WIDTHS
 motorway, motorway_link     → Thickest (1.2), darkest
 trunk, primary              → Thick (1.0)
 secondary                   → Medium (0.8)
@@ -343,26 +413,19 @@ Script detection uses Unicode ranges (U+0000-U+024F for Latin). If >80% of alpha
 
 ### Adding New Features
 
-**New map layer (e.g., railways):**
+**New map layer (e.g., beaches):** no code needed — add an entry to `layers.json`:
 
-```python
-# In create_poster(), after parks fetch:
-try:
-    railways = ox.features_from_point(point, tags={'railway': 'rail'}, dist=dist)
-except:
-    railways = None
-
-# Then plot before roads:
-if railways is not None and not railways.empty:
-    railways = railways.to_crs(g_proj.graph["crs"])
-    railways.plot(ax=ax, color=THEME['railway'], linewidth=0.5, zorder=2.5)
+```json
+{"name": "beach", "tags": {"natural": ["beach"]}, "color_key": "beach", "fallback_key": "parks", "zorder": 0.7}
 ```
+
+Polygon layers go in `polygon_layers`; line layers go in `line_layers` and also take `"linewidth"`, plus optional `"core_key"`/`"core_width_ratio"` for a dual-stroke effect. Editing `layers.json` automatically invalidates the prepared-data cache (its hash is part of the cache key), so the next run refetches/rebuilds as needed.
 
 **New theme property:**
 
-1. Add to theme JSON: `"railway": "#FF0000"`
-2. Use in code: `THEME['railway']`
-3. Add fallback in `load_theme()` default dict
+1. Add to theme JSON: `"beach": "#F0E0B0"`
+2. Reference it as the layer's `color_key` in `layers.json`
+3. Themes without the key use the layer's `fallback_key` (or the layer is skipped)
 
 ### Typography Positioning
 
@@ -393,7 +456,8 @@ G = ox.graph_from_point(point, dist=dist, network_type='walk')   # pedestrian
 
 ### Performance Tips
 
-- Large `dist` values (>20km) = slow downloads + memory heavy
-- Cache coordinates locally to avoid Nominatim rate limits
-- Use `network_type='drive'` instead of `'all'` for faster renders
-- Reduce `dpi` from 300 to 150 for quick previews
+- Everything is cached in `cache/` (override with the `CACHE_DIR` env var): raw OSM downloads per layer, plus a prepared render bundle per (location, distance, layer-config). Repeat runs skip fetching and preprocessing entirely — regenerating a poster in a new theme takes ~2s instead of minutes.
+- `--all-themes` prepares the data once and renders all themes in parallel worker processes.
+- Large `dist` values (>20km) = slow downloads + memory heavy.
+- Use `network_type='drive'` instead of `'all'` for faster renders.
+- Reduce `dpi` from 300 to 150 for quick previews.
