@@ -1,0 +1,12 @@
+{
+  "polygon_layers": [
+    {"name": "water",    "tags": {"natural": ["water", "bay", "strait"], "waterway": "riverbank"}, "color_key": "water", "fallback_key": null, "zorder": 0.5},
+    {"name": "farmland", "tags": {"landuse": ["farmland", "orchard", "vineyard"]}, "color_key": "farmland", "fallback_key": "parks", "zorder": 0.6},
+    {"name": "forest",   "tags": {"landuse": ["forest"], "natural": ["wood"]}, "color_key": "forest", "fallback_key": "parks", "zorder": 0.65},
+    {"name": "grass",    "tags": {"landuse": ["meadow", "village_green", "recreation_ground"], "natural": ["grassland"]}, "color_key": "grass", "fallback_key": "parks", "zorder": 0.75},
+    {"name": "parks",    "tags": {"leisure": "park", "landuse": "grass"}, "color_key": "parks", "fallback_key": null, "zorder": 0.8}
+  ],
+  "line_layers": [
+    {"name": "rail", "tags": {"railway": ["rail", "subway", "tram", "light_rail"]}, "color_key": "rail", "fallback_key": "road_secondary", "zorder": 1.05, "linewidth": 0.5, "core_key": "rail_core", "core_width_ratio": 0.4}
+  ]
+}
